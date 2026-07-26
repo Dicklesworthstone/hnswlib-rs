@@ -1934,6 +1934,42 @@ mod tests {
     }
 
     #[test]
+    fn small_parallel_insertions_keep_every_point_search_reachable() {
+        for count in [3_usize, 16, 17] {
+            for vector_seed in 0..8 {
+                let vectors = (0..count)
+                    .map(|index| seeded_unit_vector(vector_seed * 100 + index, 16))
+                    .collect::<Vec<_>>();
+                for level_seed in 0..256_u64 {
+                    let mut hnsw =
+                        Hnsw::<f32, dist::DistDot>::new(16, count, 16, 200, dist::DistDot {});
+                    hnsw.layer_indexed_points.layer_g.rng = Arc::new(Mutex::new(
+                        <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(level_seed),
+                    ));
+                    hnsw.insert((&vectors[0], 0));
+                    let remaining = vectors
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .map(|(origin, vector)| (vector, origin))
+                        .collect::<Vec<_>>();
+                    hnsw.parallel_insert(&remaining);
+
+                    for (query_id, query) in vectors.iter().enumerate() {
+                        let neighbours = hnsw.search(query, count, count.max(64));
+                        assert_eq!(
+                            neighbours.len(),
+                            count,
+                            "count={count}, vector_seed={vector_seed}, \
+                             level_seed={level_seed}, query={query_id}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_iter_point() {
         //
         println!("\n\n test_iter_point");
