@@ -932,9 +932,18 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
         // we will store positive distances in this one
         let mut return_points = BinaryHeap::<Arc<PointWithOrder<T>>>::with_capacity(skiplist_size);
         //
-        if self.layer_indexed_points.points_by_layer.read()[layer as usize].is_empty() {
-            // at the beginning we can have nothing in layer
-            trace!("search layer {:?}, empty layer", layer);
+        // `points_by_layer[l]` stores points whose *top sampled level* is
+        // exactly `l`; it is not the set of points participating in logical
+        // layer `l`. A higher-level entry point participates in every lower
+        // layer even when the exact-level bucket is empty. Treating that bucket
+        // as an emptiness oracle disconnects graphs for sampled level orders
+        // such as [high, high, 0].
+        if entry_point.p_id.0 < layer {
+            trace!(
+                "search layer {:?}, entry point {:?} does not participate",
+                layer,
+                entry_point.p_id
+            );
             return return_points;
         }
         if entry_point.p_id.1 < 0 {
@@ -1967,6 +1976,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn empty_exact_level_bucket_does_not_hide_higher_level_points() {
+        let vectors = [
+            seeded_unit_vector(10, 16),
+            seeded_unit_vector(11, 16),
+            seeded_unit_vector(12, 16),
+        ];
+        let mut exercised_gap_order = false;
+
+        for level_seed in 0..65_536_u64 {
+            let mut hnsw = Hnsw::<f32, dist::DistDot>::new(16, 3, 16, 200, dist::DistDot {});
+            hnsw.layer_indexed_points.layer_g.rng = Arc::new(Mutex::new(
+                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(level_seed),
+            ));
+            for (origin, vector) in vectors.iter().enumerate() {
+                hnsw.insert((vector, origin));
+            }
+            let mut levels = hnsw
+                .get_point_indexation()
+                .into_iter()
+                .map(|point| (point.get_origin_id(), point.get_point_id().0))
+                .collect::<Vec<_>>();
+            levels.sort_unstable_by_key(|(origin, _)| *origin);
+            if levels[0].1 > 0 && levels[1].1 > 0 && levels[2].1 == 0 {
+                exercised_gap_order = true;
+                for (query_id, query) in vectors.iter().enumerate() {
+                    let neighbours = hnsw.search(query, 3, 64);
+                    assert_eq!(
+                        neighbours.len(),
+                        3,
+                        "level_seed={level_seed}, levels={levels:?}, query={query_id}"
+                    );
+                }
+                break;
+            }
+        }
+
+        assert!(
+            exercised_gap_order,
+            "seed sweep must exercise sampled levels [high, high, 0]"
+        );
     }
 
     #[test]
