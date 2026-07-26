@@ -1779,7 +1779,10 @@ mod tests {
         let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
         if norm > 0.0 {
             for value in &mut vector {
-                *value /= norm;
+                // Leave a deterministic roundoff margin below unit radius;
+                // anndists::DistDot asserts when an accumulated self-dot
+                // rounds above one.
+                *value = (*value / norm) * 0.999;
             }
         }
         vector
