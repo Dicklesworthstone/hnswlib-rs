@@ -1840,7 +1840,8 @@ mod tests {
     #[test]
     fn reverse_edges_stay_within_each_points_layers() {
         let vectors = [vec![1.0_f32, 0.0], vec![0.0_f32, 1.0]];
-        let mut exercised_different_levels = false;
+        let mut exercised_new_point_above_entry = false;
+        let mut exercised_new_point_below_entry = false;
 
         for seed in 0..4096_u64 {
             let mut hnsw = Hnsw::<f32, dist::DistL1>::new(16, 2, 16, 200, dist::DistL1 {});
@@ -1848,13 +1849,14 @@ mod tests {
                 <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed),
             ));
             hnsw.insert((&vectors[0], 0));
-            hnsw.insert((&vectors[1], 1));
+            hnsw.parallel_insert(&[(&vectors[1], 1)]);
 
             let points: Vec<_> = hnsw.get_point_indexation().into_iter().collect();
-            if points[0].p_id.0 == points[1].p_id.0 {
-                continue;
+            match points[1].p_id.0.cmp(&points[0].p_id.0) {
+                std::cmp::Ordering::Greater => exercised_new_point_above_entry = true,
+                std::cmp::Ordering::Less => exercised_new_point_below_entry = true,
+                std::cmp::Ordering::Equal => {}
             }
-            exercised_different_levels = true;
 
             for point in &points {
                 let max_layer = usize::from(point.p_id.0);
@@ -1872,12 +1874,14 @@ mod tests {
                 assert_eq!(neighbours.len(), 2);
                 assert_eq!(neighbours[0].d_id, expected_id);
             }
-            break;
+            if exercised_new_point_above_entry && exercised_new_point_below_entry {
+                break;
+            }
         }
 
         assert!(
-            exercised_different_levels,
-            "seed sweep must exercise points with different sampled levels"
+            exercised_new_point_above_entry && exercised_new_point_below_entry,
+            "seed sweep must exercise both relative sampled-level orders"
         );
     }
 
