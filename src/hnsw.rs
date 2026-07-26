@@ -1283,12 +1283,12 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
     /// This read-only accessor lets persistence and conformance layers attest
     /// that every indexed point is reachable from the same entry point used by
     /// [`Hnsw::search`]. An empty graph has no entry point.
-    pub fn get_entry_point_id(&self) -> Option<PointId> {
+    pub fn get_entry_point_id(&self) -> Option<(DataId, PointId)> {
         self.layer_indexed_points
             .entry_point
             .read()
             .as_ref()
-            .map(|point| point.get_point_id())
+            .map(|point| (point.get_origin_id(), point.get_point_id()))
     }
 
     // This is best explained in : Navarro. Searching in metric spaces by spatial approximation.
@@ -1773,13 +1773,14 @@ mod tests {
         let first_entry = hnsw
             .get_entry_point_id()
             .expect("one-point graph must expose its entry point");
+        let first_point = hnsw
+            .get_point_indexation()
+            .into_iter()
+            .next()
+            .expect("one-point graph");
         assert_eq!(
             first_entry,
-            hnsw.get_point_indexation()
-                .into_iter()
-                .next()
-                .expect("one-point graph")
-                .get_point_id()
+            (first_point.get_origin_id(), first_point.get_point_id())
         );
 
         hnsw.insert((&[0.0_f32, 1.0], 1));
@@ -1791,9 +1792,9 @@ mod tests {
             .into_iter()
             .map(|point| point.get_point_id())
             .collect::<Vec<_>>();
-        assert!(point_ids.contains(&current_entry));
+        assert!(point_ids.contains(&current_entry.1));
         assert_eq!(
-            current_entry.0,
+            current_entry.1.0,
             point_ids
                 .iter()
                 .map(|point_id| point_id.0)
