@@ -1758,6 +1758,8 @@ where
 mod tests {
 
     use super::*;
+    use crate::api::AnnT;
+    use crate::hnswio::HnswIo;
     use anndists::dist;
 
     fn log_init_test() {
@@ -1793,8 +1795,9 @@ mod tests {
             .map(|point| point.get_point_id())
             .collect::<Vec<_>>();
         assert!(point_ids.contains(&current_entry.1));
+        let current_point_id = current_entry.1;
         assert_eq!(
-            current_entry.1.0,
+            current_point_id.0,
             point_ids
                 .iter()
                 .map(|point_id| point_id.0)
@@ -1802,6 +1805,36 @@ mod tests {
                 .expect("two-point graph"),
             "the exposed entry point must be on the highest populated layer"
         );
+    }
+
+    #[test]
+    fn entry_point_identity_survives_dump_and_load() {
+        let hnsw = Hnsw::<f32, dist::DistL1>::new(16, 4, 16, 200, dist::DistL1 {});
+        for (origin, vector) in [
+            [1.0_f32, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            hnsw.insert((vector, origin));
+        }
+        let expected = hnsw
+            .get_entry_point_id()
+            .expect("populated graph must expose its entry point");
+
+        let directory = tempfile::tempdir().expect("temporary dump directory");
+        let basename = "entry-point-roundtrip";
+        hnsw.file_dump(directory.path(), basename)
+            .expect("entry-point graph dump");
+
+        let mut reloader = HnswIo::new(directory.path(), basename);
+        let loaded = reloader
+            .load_hnsw::<f32, dist::DistL1>()
+            .expect("entry-point graph reload");
+        assert_eq!(loaded.get_entry_point_id(), Some(expected));
     }
 
     #[test]
