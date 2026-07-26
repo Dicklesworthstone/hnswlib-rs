@@ -1127,12 +1127,6 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             // sorted_points = from_positive_binaryheap_to_negative_binary_heap(&mut sorted_points);
             //
             if let Some(ep) = sorted_points.pop() {
-                // useful for projecting lower layer to upper layer. keep track of points encountered.
-                if new_point.neighbours.read()[l as usize].len()
-                    < self.get_max_nb_connection() as usize
-                {
-                    new_point.neighbours.write()[l as usize].push(Arc::clone(&ep));
-                }
                 // get the lowest distance point
                 let tmp_dist = self.dist_f.eval(data, ep.point_ref.data.get_v());
                 if tmp_dist < dist_to_entry {
@@ -1145,8 +1139,11 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
             }
         }
         // now enter_point_id_copy contains id of nearest
-        // now loop down to 0
-        for l in (0..level + 1).rev() {
+        // Connect only in layers shared by the new point and the existing
+        // graph. A point above the previous maximum is the sole member of its
+        // extra layers until a future insertion reaches them.
+        let highest_shared_layer = level.min(max_level_observed);
+        for l in (0..highest_shared_layer + 1).rev() {
             let ef = self.ef_construction;
             // when l == level, we cannot get new_point in sorted_points as it is seen only from declared neighbours
             let mut sorted_points = self.search_layer(
@@ -1240,9 +1237,10 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                     let q_point = &q.point_ref;
                     let mut q_point_neighbours = q_point.neighbours.write();
                     let n_to_add = PointWithOrder::<T>::new(&Arc::clone(&new_point), q.dist_to_ref);
-                    // must be sure that we add a point at the correct level. See the comment to search_layer!
-                    // this ensures that reverse updating do not add problems.
-                    let l_n = n_to_add.point_ref.p_id.0 as usize;
+                    // Mirror the forward edge in the same layer. Using the new
+                    // point's top layer here misfiles every lower-layer reverse
+                    // edge whenever the new point spans multiple layers.
+                    let l_n = l as usize;
                     let already = q_point_neighbours[l_n]
                         .iter()
                         .position(|old| old.point_ref.p_id == new_point.p_id);
@@ -1751,6 +1749,50 @@ mod tests {
 
     fn log_init_test() {
         let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[test]
+    fn reverse_edges_stay_within_each_points_layers() {
+        let vectors = [vec![1.0_f32, 0.0], vec![0.0_f32, 1.0]];
+        let mut exercised_different_levels = false;
+
+        for seed in 0..4096_u64 {
+            let mut hnsw = Hnsw::<f32, dist::DistL1>::new(16, 2, 16, 200, dist::DistL1 {});
+            hnsw.layer_indexed_points.layer_g.rng = Arc::new(Mutex::new(
+                <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed),
+            ));
+            hnsw.insert((&vectors[0], 0));
+            hnsw.insert((&vectors[1], 1));
+
+            let points: Vec<_> = hnsw.get_point_indexation().into_iter().collect();
+            if points[0].p_id.0 == points[1].p_id.0 {
+                continue;
+            }
+            exercised_different_levels = true;
+
+            for point in &points {
+                let max_layer = usize::from(point.p_id.0);
+                let neighbourhoods = point.get_neighborhood_id();
+                assert!(
+                    neighbourhoods.iter().skip(max_layer + 1).all(Vec::is_empty),
+                    "point {:?} has neighbours above its sampled layer: {:?}",
+                    point.p_id,
+                    neighbourhoods
+                );
+            }
+
+            for (expected_id, query) in vectors.iter().enumerate() {
+                let neighbours = hnsw.search(query, 2, 64);
+                assert_eq!(neighbours.len(), 2);
+                assert_eq!(neighbours[0].d_id, expected_id);
+            }
+            break;
+        }
+
+        assert!(
+            exercised_different_levels,
+            "seed sweep must exercise points with different sampled levels"
+        );
     }
 
     #[test]
