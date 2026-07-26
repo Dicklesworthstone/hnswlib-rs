@@ -1844,7 +1844,7 @@ mod tests {
         let mut exercised_new_point_below_entry = false;
 
         for seed in 0..4096_u64 {
-            let mut hnsw = Hnsw::<f32, dist::DistL1>::new(16, 2, 16, 200, dist::DistL1 {});
+            let mut hnsw = Hnsw::<f32, dist::DistDot>::new(16, 2, 16, 200, dist::DistDot {});
             hnsw.layer_indexed_points.layer_g.rng = Arc::new(Mutex::new(
                 <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed),
             ));
@@ -1885,9 +1885,6 @@ mod tests {
                 let neighbours = hnsw.search(query, 2, 64);
                 assert_eq!(neighbours.len(), 2);
                 assert_eq!(neighbours[0].d_id, expected_id);
-            }
-            if exercised_new_point_above_entry && exercised_new_point_below_entry {
-                break;
             }
         }
 
