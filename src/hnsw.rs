@@ -1852,7 +1852,19 @@ mod tests {
             hnsw.parallel_insert(&[(&vectors[1], 1)]);
 
             let points: Vec<_> = hnsw.get_point_indexation().into_iter().collect();
-            match points[1].p_id.0.cmp(&points[0].p_id.0) {
+            let first_level = points
+                .iter()
+                .find(|point| point.get_origin_id() == 0)
+                .expect("first inserted point")
+                .p_id
+                .0;
+            let second_level = points
+                .iter()
+                .find(|point| point.get_origin_id() == 1)
+                .expect("second inserted point")
+                .p_id
+                .0;
+            match second_level.cmp(&first_level) {
                 std::cmp::Ordering::Greater => exercised_new_point_above_entry = true,
                 std::cmp::Ordering::Less => exercised_new_point_below_entry = true,
                 std::cmp::Ordering::Equal => {}
