@@ -1278,6 +1278,19 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
         &self.layer_indexed_points
     }
 
+    /// Returns the internal identity of the graph's current search entry point.
+    ///
+    /// This read-only accessor lets persistence and conformance layers attest
+    /// that every indexed point is reachable from the same entry point used by
+    /// [`Hnsw::search`]. An empty graph has no entry point.
+    pub fn get_entry_point_id(&self) -> Option<PointId> {
+        self.layer_indexed_points
+            .entry_point
+            .read()
+            .as_ref()
+            .map(|point| point.get_point_id())
+    }
+
     // This is best explained in : Navarro. Searching in metric spaces by spatial approximation.
     /// simplest searh neighbours
     // The binary heaps here is with negative distance sorted.
@@ -1749,6 +1762,45 @@ mod tests {
 
     fn log_init_test() {
         let _ = env_logger::builder().is_test(true).try_init();
+    }
+
+    #[test]
+    fn entry_point_identity_is_empty_then_matches_search_root() {
+        let hnsw = Hnsw::<f32, dist::DistL1>::new(16, 2, 16, 200, dist::DistL1 {});
+        assert_eq!(hnsw.get_entry_point_id(), None);
+
+        hnsw.insert((&[1.0_f32, 0.0], 0));
+        let first_entry = hnsw
+            .get_entry_point_id()
+            .expect("one-point graph must expose its entry point");
+        assert_eq!(
+            first_entry,
+            hnsw.get_point_indexation()
+                .into_iter()
+                .next()
+                .expect("one-point graph")
+                .get_point_id()
+        );
+
+        hnsw.insert((&[0.0_f32, 1.0], 1));
+        let current_entry = hnsw
+            .get_entry_point_id()
+            .expect("non-empty graph must retain an entry point");
+        let point_ids = hnsw
+            .get_point_indexation()
+            .into_iter()
+            .map(|point| point.get_point_id())
+            .collect::<Vec<_>>();
+        assert!(point_ids.contains(&current_entry));
+        assert_eq!(
+            current_entry.0,
+            point_ids
+                .iter()
+                .map(|point_id| point_id.0)
+                .max()
+                .expect("two-point graph"),
+            "the exposed entry point must be on the highest populated layer"
+        );
     }
 
     #[test]
