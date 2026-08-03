@@ -102,7 +102,11 @@ itertools = {version = "0.14"}
 
 [features]
 
-default = []
+# Keep the historical C ABI by default while allowing Rust applications to
+# link two source revisions into one comparison binary without duplicate
+# `no_mangle` symbols.
+default = ["ffi"]
+ffi = []
 
 # feature for std simd on nightly
 stdsimd = ["anndists/stdsimd"]
