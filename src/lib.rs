@@ -11,6 +11,7 @@ pub mod filter;
 pub mod flatten;
 pub mod hnsw;
 pub mod hnswio;
+#[cfg(feature = "ffi")]
 pub mod libext;
 pub mod prelude;
 

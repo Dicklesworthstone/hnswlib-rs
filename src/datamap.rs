@@ -216,7 +216,7 @@ impl DataMap {
                 v_serialized.as_ptr() as *const T
             );
         } // end of for on record
-        //
+          //
         debug!("End of DataMap::from_hnsw.");
         //
         let datamap = DataMap {

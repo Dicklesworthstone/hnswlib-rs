@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::hnsw::*;
 use crate::hnswio::*;
