@@ -170,6 +170,11 @@ pub struct Point<'b, T: Clone + Send + Sync> {
     p_id: PointId,
     /// neighbours info
     pub(crate) neighbours: Arc<RwLock<Vec<Vec<Arc<PointWithOrder<'b, T>>>>>>,
+    /// Base-layer neighbour selected when this point was admitted.
+    ///
+    /// Retaining this one edge gives serial construction a bounded spanning
+    /// backbone even when later reverse-edge pruning removes local bridges.
+    pub(crate) base_parent: Arc<RwLock<Option<PointId>>>,
 }
 
 impl<'b, T: Clone + Send + Sync> Point<'b, T> {
@@ -184,6 +189,7 @@ impl<'b, T: Clone + Send + Sync> Point<'b, T> {
             origin_id,
             p_id,
             neighbours: Arc::new(RwLock::new(neighbours)),
+            base_parent: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -198,6 +204,7 @@ impl<'b, T: Clone + Send + Sync> Point<'b, T> {
             origin_id,
             p_id,
             neighbours: Arc::new(RwLock::new(neighbours)),
+            base_parent: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -1202,6 +1209,13 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                 neighbours.sort_unstable();
                 // we must add bidirecti*onal from data i.e new_point_id to neighbours
                 new_point.neighbours.write()[l as usize].clone_from(&neighbours);
+                // The first base-layer edge establishes a serial-construction
+                // backbone. It must not later be evicted by a reverse-neighbour
+                // cap, or repeated local pruning can split weak components.
+                if l == 0 {
+                    *new_point.base_parent.write() =
+                        neighbours.first().map(|neighbour| neighbour.point_ref.p_id);
+                }
                 // this reverse neighbour update could be done here but we put it at end to gather all code
                 // requiring a mutex guard for multi threading.
                 // update ep for loop iteration. As we sorted neighbours the nearest
@@ -1287,7 +1301,21 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                         // sort and shring if necessary
                         q_point_neighbours[l_n].sort_unstable();
                         if shrink {
-                            q_point_neighbours[l_n].pop();
+                            // At the base layer, retain the point's original
+                            // serial-admission parent. Remove the farthest
+                            // other edge so the configured degree cap remains
+                            // unchanged while the spanning backbone survives.
+                            let protected_parent =
+                                (l_n == 0).then(|| *q_point.base_parent.read()).flatten();
+                            let removal_index =
+                                q_point_neighbours[l_n].iter().rposition(|neighbour| {
+                                    Some(neighbour.point_ref.p_id) != protected_parent
+                                });
+                            if let Some(index) = removal_index {
+                                q_point_neighbours[l_n].remove(index);
+                            } else {
+                                q_point_neighbours[l_n].pop();
+                            }
                         }
                     }
                 } // end protection against point identity
@@ -1983,6 +2011,54 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn serial_base_parent_backbone_survives_reverse_edge_pruning() {
+        const COUNT: usize = 4_096;
+        const MAX_CONNECTIONS: usize = 2;
+
+        let hnsw = Hnsw::<f32, dist::DistL1>::new(MAX_CONNECTIONS, COUNT, 16, 64, dist::DistL1 {});
+        // Duplicate-heavy input drives repeated reverse updates through the
+        // same local neighbourhood, the condition that used to evict bridges.
+        for origin in 0..COUNT {
+            hnsw.insert((&[0.0_f32, 0.0], origin));
+        }
+
+        let points = hnsw.get_point_indexation().into_iter().collect::<Vec<_>>();
+        let by_id = points
+            .iter()
+            .map(|point| (point.get_point_id(), Arc::clone(point)))
+            .collect::<HashMap<_, _>>();
+
+        for point in points {
+            let parent = *point.base_parent.read();
+            if point.get_origin_id() == 0 {
+                assert_eq!(parent, None, "the serial seed has no parent");
+                continue;
+            }
+            let parent = parent.expect("every non-seed serial insertion has a base parent");
+            let neighbourhood = point.neighbours.read();
+            assert!(
+                neighbourhood[0]
+                    .iter()
+                    .any(|neighbour| neighbour.point_ref.p_id == parent),
+                "origin {} lost its protected base parent {parent:?}",
+                point.get_origin_id()
+            );
+            assert!(
+                neighbourhood[0].len() <= 2 * MAX_CONNECTIONS,
+                "origin {} exceeded the base-layer degree cap",
+                point.get_origin_id()
+            );
+            let parent_point = by_id
+                .get(&parent)
+                .expect("protected parent remains an indexed point");
+            assert!(
+                parent_point.get_origin_id() < point.get_origin_id(),
+                "serial parent must precede its child"
+            );
         }
     }
 
