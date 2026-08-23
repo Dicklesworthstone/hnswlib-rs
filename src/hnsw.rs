@@ -170,6 +170,16 @@ pub struct Point<'b, T: Clone + Send + Sync> {
     p_id: PointId,
     /// neighbours info
     pub(crate) neighbours: Arc<RwLock<Vec<Vec<Arc<PointWithOrder<'b, T>>>>>>,
+    /// Nearest base-layer neighbour selected when this point was admitted.
+    ///
+    /// Every non-seed insertion joins the graph through this edge. Keeping it
+    /// exempt from reverse-edge pruning preserves a spanning backbone over
+    /// serially inserted points, so the undirected base layer cannot split
+    /// into multiple weak components (see `reverse_update_neighborhood_simple`).
+    /// Points rebuilt by a reload start with no recorded anchor; their stored
+    /// edges are kept as dumped, but only insertions performed by this process
+    /// gain the protection.
+    base_anchor: std::sync::OnceLock<PointId>,
 }
 
 impl<'b, T: Clone + Send + Sync> Point<'b, T> {
@@ -184,6 +194,7 @@ impl<'b, T: Clone + Send + Sync> Point<'b, T> {
             origin_id,
             p_id,
             neighbours: Arc::new(RwLock::new(neighbours)),
+            base_anchor: std::sync::OnceLock::new(),
         }
     }
 
@@ -198,6 +209,7 @@ impl<'b, T: Clone + Send + Sync> Point<'b, T> {
             origin_id,
             p_id,
             neighbours: Arc::new(RwLock::new(neighbours)),
+            base_anchor: std::sync::OnceLock::new(),
         }
     }
 
@@ -1202,6 +1214,12 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                 neighbours.sort_unstable();
                 // we must add bidirecti*onal from data i.e new_point_id to neighbours
                 new_point.neighbours.write()[l as usize].clone_from(&neighbours);
+                if l == 0 && !neighbours.is_empty() {
+                    // Record the admission edge before the point becomes a
+                    // reverse-update target: this nearest base neighbour is the
+                    // one edge pruning must never evict from this point's list.
+                    let _ = new_point.base_anchor.set(neighbours[0].point_ref.p_id);
+                }
                 // this reverse neighbour update could be done here but we put it at end to gather all code
                 // requiring a mutex guard for multi threading.
                 // update ep for loop iteration. As we sorted neighbours the nearest
@@ -1284,10 +1302,32 @@ impl<'b, T: Clone + Send + Sync, D: Distance<T> + Send + Sync> Hnsw<'b, T, D> {
                     };
                     let shrink = nbn_at_l > threshold_shrinking;
                     {
-                        // sort and shring if necessary
+                        // sort and shrink if necessary
                         q_point_neighbours[l_n].sort_unstable();
                         if shrink {
-                            q_point_neighbours[l_n].pop();
+                            // Evict the farthest edge, but never the point's
+                            // base-layer admission anchor: repeated local
+                            // pruning used to remove an old bridge edge from
+                            // both of its endpoints, splitting the undirected
+                            // base layer into several weak components. Sparing
+                            // this single edge keeps a spanning backbone while
+                            // leaving the configured degree cap unchanged.
+                            let anchor = if l_n == 0 {
+                                q_point.base_anchor.get().copied()
+                            } else {
+                                None
+                            };
+                            let evict = q_point_neighbours[l_n]
+                                .iter()
+                                .rposition(|old| Some(old.point_ref.p_id) != anchor);
+                            match evict {
+                                Some(index) => {
+                                    q_point_neighbours[l_n].remove(index);
+                                }
+                                None => {
+                                    q_point_neighbours[l_n].pop();
+                                }
+                            }
                         }
                     }
                 } // end protection against point identity
@@ -2180,12 +2220,67 @@ mod tests {
             .count()
     }
 
-    /// Serial insertion admits every point through a nonempty base-layer
-    /// neighbour set, so the undirected base graph must stay one weak
-    /// component. Reverse-edge pruning used to evict bridge edges from both
-    /// endpoints under duplicate-heavy input, splitting the graph.
+    /// Serial insertion admits every non-seed point through a nonempty
+    /// base-layer neighbour set, so the undirected base graph must stay one
+    /// weak component. Farthest-first reverse pruning used to evict a bridge
+    /// edge from both of its endpoints under sustained local churn, splitting
+    /// the base layer (observed in production as multi-component attestation
+    /// failures; regression for the base-anchor protection).
     #[test]
     fn serial_insertion_keeps_base_layer_weakly_connected() {
+        const MAX_CONNECTIONS: usize = 2;
+        const WAVES: usize = 1_500;
+        // Deterministic jitter in [0, 1e-3): keeps every intra-cluster
+        // distance distinct and spreads reverse updates over each cluster.
+        fn jitter(seed: usize) -> f32 {
+            let mut state = (seed as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state ^= state >> 30;
+            state = state.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            state ^= state >> 27;
+            (state & 0xFFFF) as f32 / 65_536.0 * 1.0e-3
+        }
+        let total = 2 * WAVES + 64;
+        let hnsw =
+            Hnsw::<f32, dist::DistL1>::new(MAX_CONNECTIONS, total, 16, 48, dist::DistL1 {});
+        let mut origin = 0;
+        // Seed both tiny clusters; the first cluster-B points bridge to A.
+        for i in 0..32 {
+            hnsw.insert((&[jitter(i), jitter(i + 7)], origin));
+            origin += 1;
+        }
+        for i in 0..32 {
+            hnsw.insert((&[1_000.0 + jitter(i + 101), jitter(i + 205)], origin));
+            origin += 1;
+        }
+        // Alternating dense waves into the same two discs: every list keeps
+        // receiving nearer intra-cluster reverse edges, so unprotected
+        // farthest-first pruning steadily evicts both halves of bridge edges.
+        // Without the base-anchor protection this input splits the base layer
+        // into three weak components.
+        for _ in 0..WAVES {
+            hnsw.insert((&[jitter(origin), jitter(origin + 13)], origin));
+            origin += 1;
+            hnsw.insert((&[1_000.0 + jitter(origin + 3), jitter(origin + 17)], origin));
+            origin += 1;
+        }
+        let components = base_layer_weak_component_count(&hnsw);
+        assert_eq!(
+            components, 1,
+            "serial two-cluster insertion split the base layer into {components} weak components"
+        );
+        // The anchor protection changes which edge is evicted, never how many:
+        // the configured base-layer degree cap must still hold everywhere.
+        for point in hnsw.get_point_indexation().into_iter() {
+            assert!(
+                point.neighbours.read()[0].len() <= 2 * MAX_CONNECTIONS,
+                "origin {} exceeded the base-layer degree cap",
+                point.get_origin_id()
+            );
+        }
+    }
+
+    #[test]
+    fn serial_duplicate_heavy_insertion_keeps_base_layer_weakly_connected() {
         const COUNT: usize = 4_096;
         const MAX_CONNECTIONS: usize = 2;
         let hnsw = Hnsw::<f32, dist::DistL1>::new(MAX_CONNECTIONS, COUNT, 16, 64, dist::DistL1 {});
