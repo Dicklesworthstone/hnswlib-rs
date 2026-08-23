@@ -2145,4 +2145,58 @@ mod tests {
             assert_eq!(result, vec![Neighbour::new(0, 0.0, PointId(0, 0))]);
         }
     }
+
+    /// Union-find over the undirected base-layer graph: every stored adjacency
+    /// (in either endpoint's list) is an edge. Returns the component count.
+    fn base_layer_weak_component_count<T: Clone + Send + Sync, D: Distance<T> + Send + Sync>(
+        hnsw: &Hnsw<T, D>,
+    ) -> usize {
+        let points = hnsw.get_point_indexation().into_iter().collect::<Vec<_>>();
+        let index_of = points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.get_point_id(), index))
+            .collect::<HashMap<_, _>>();
+        let mut parent = (0..points.len()).collect::<Vec<_>>();
+        fn find(parent: &mut [usize], mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        for (index, point) in points.iter().enumerate() {
+            for neighbour in &point.neighbours.read()[0] {
+                let other = index_of[&neighbour.point_ref.p_id];
+                let ra = find(&mut parent, index);
+                let rb = find(&mut parent, other);
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+        (0..points.len())
+            .filter(|&index| find(&mut parent, index) == index)
+            .count()
+    }
+
+    /// Serial insertion admits every point through a nonempty base-layer
+    /// neighbour set, so the undirected base graph must stay one weak
+    /// component. Reverse-edge pruning used to evict bridge edges from both
+    /// endpoints under duplicate-heavy input, splitting the graph.
+    #[test]
+    fn serial_insertion_keeps_base_layer_weakly_connected() {
+        const COUNT: usize = 4_096;
+        const MAX_CONNECTIONS: usize = 2;
+        let hnsw = Hnsw::<f32, dist::DistL1>::new(MAX_CONNECTIONS, COUNT, 16, 64, dist::DistL1 {});
+        for origin in 0..COUNT {
+            hnsw.insert((&[0.0_f32, 0.0], origin));
+        }
+        let components = base_layer_weak_component_count(&hnsw);
+        assert_eq!(
+            components, 1,
+            "serial duplicate-heavy insertion split the base layer into {components} weak components"
+        );
+    }
+
 } // end of module test
