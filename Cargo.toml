@@ -1,13 +1,17 @@
 [package]
-name = "hnsw_rs"
-version = "0.3.4"
+# Published as `frankenhnsw`: crates.io `hnsw_rs` belongs to the upstream
+# project. This fork (Dicklesworthstone/hnswlib-rs) carries layer-invariant
+# and hnswio-hardening fixes over upstream 0.3.4. Consumers keep the upstream
+# import path via `hnsw_rs = { package = "frankenhnsw", ... }`.
+name = "frankenhnsw"
+version = "0.3.5"
 authors = ["jeanpierre.both@gmail.com"]
-description = "Ann based on Hierarchical Navigable Small World Graphs from Yu.A. Malkov and D.A Yashunin"
+description = "Ann based on Hierarchical Navigable Small World Graphs from Yu.A. Malkov and D.A Yashunin (frankenhnsw fork of hnsw_rs 0.3.4 with search-correctness and hnswio hardening fixes)"
 license = "MIT/Apache-2.0"
 readme = "README.md"
 keywords = ["algorithms", "ann", "hnsw"]
-repository = "https://github.com/jean-pierreBoth/hnswlib-rs"
-documentation = "https://docs.rs/hnsw_rs"
+repository = "https://github.com/Dicklesworthstone/hnswlib-rs"
+documentation = "https://docs.rs/frankenhnsw"
 edition = "2024"
 
 
